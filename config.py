@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -95,6 +96,8 @@ def configure_playwright_runtime() -> None:
 
 def _windows_default_browser() -> Path | None:
     """Return the executable registered for HTTPS links when it is Chromium-based."""
+    if sys.platform != "win32":
+        return None
     try:
         import winreg
 
