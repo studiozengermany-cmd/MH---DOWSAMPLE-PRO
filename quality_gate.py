@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import wave
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from urllib.parse import urlparse
 import librosa
 import numpy as np
 import requests
+import soundfile as sf
 
 from config import QUALITY
 from exceptions import AudioAnalysisError, HTTPError, NetworkError
@@ -222,6 +225,49 @@ class QualityGate:
             return "hip-hop" if centroid < 2500 else "pop"
         return "lo-fi"
 
+    def _load_audio(self, path: Path) -> tuple[np.ndarray, int]:
+        try:
+            # 1. Quick read using soundfile
+            data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+            y = data.T
+            if y.shape[0] == 1:
+                y = y[0]
+            return y, sr
+        except Exception:
+            pass
+
+        # 2. Fallback to ffmpeg decoding to temp wav file with timeout
+        temp_wav = None
+        try:
+            fd, temp_path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            temp_wav = Path(temp_path)
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-v", "error",
+                "-i", str(path),
+                "-acodec", "pcm_s16le",
+                str(temp_wav)
+            ]
+            # Use a 30s timeout to prevent hanging forever
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+
+            data, sr = sf.read(str(temp_wav), dtype="float32", always_2d=True)
+            y = data.T
+            if y.shape[0] == 1:
+                y = y[0]
+            return y, sr
+        except Exception as exc:
+            raise AudioAnalysisError(f"Failed to load audio file {path} using both soundfile and ffmpeg: {exc}") from exc
+        finally:
+            if temp_wav and temp_wav.exists():
+                try:
+                    temp_wav.unlink()
+                except Exception:
+                    pass
+
     def analyze(self, filepath: Path | str) -> dict[str, Any]:
         path = Path(filepath)
         result: dict[str, Any] = {
@@ -242,7 +288,7 @@ class QualityGate:
         }
         try:
             bitrate = self._get_bitrate(path)
-            y, sr = librosa.load(path, sr=None, mono=False)
+            y, sr = self._load_audio(path)
             sr = int(sr)
             channels = 1 if y.ndim == 1 else y.shape[0]
             mono = librosa.to_mono(y) if y.ndim > 1 else y

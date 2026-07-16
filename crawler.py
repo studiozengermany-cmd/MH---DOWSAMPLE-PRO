@@ -624,7 +624,7 @@ class AudioCrawler:
                     url,
                     validator=validate_public_url,
                     stream=True,
-                    timeout=(10, 60),
+                    timeout=(5, 15),
                 )
             except requests.RequestException as exc:
                 raise NetworkError(str(exc)) from exc
@@ -647,10 +647,14 @@ class AudioCrawler:
                 target = self._available_path(target)
                 partial = target.with_suffix(target.suffix + ".part")
                 maximum = int(QUALITY["max_file_mb"]) * 1024 * 1024
+                import time
+                start_time = time.time()
                 total = 0
                 try:
                     with partial.open("xb") as handle:
                         for chunk in response.iter_content(64 * 1024):
+                            if time.time() - start_time > 15:
+                                raise NetworkError("Download taking too long")
                             if not chunk:
                                 continue
                             total += len(chunk)

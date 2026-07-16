@@ -1017,7 +1017,7 @@ class AudioBot:
         if not self._has_access(update):
             message = update.effective_message
             user = update.effective_user
-            if message and message.text and user:
+            if message and getattr(message, "text", None) and user:
                 text = message.text.strip()
                 # Tự động nhận diện nếu tin nhắn gửi lên là mã mời
                 try:
