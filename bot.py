@@ -40,7 +40,9 @@ from config import (
     BASE_DIR,
     DATA_DIR,
     DB_PATH,
+    DEFAULT_WORKERS,
     DOWNLOAD_DIR,
+    JOB_BATCH_FILES,
     OUTPUT_DIR,
     OWNER_DELIVERY_MODE,
     TELEGRAM_ARCHIVE_PART_BYTES,
@@ -943,7 +945,12 @@ class AudioBot:
         return await service.send_archive_with_retry(message, archive_path, caption)
 
     async def _send_processed_files(
-        self, update: Update, results: Sequence[Mapping[str, Any]], site: str
+        self,
+        update: Update,
+        results: Sequence[Mapping[str, Any]],
+        site: str,
+        *,
+        retry_results: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         message = update.effective_message
         if not message:
@@ -952,7 +959,12 @@ class AudioBot:
         retry_store = getattr(self, "delivery_retry_store", None)
         if user and retry_store:
             try:
-                retry_store.save(user.id, site, results, self.output_dir)
+                retry_store.save(
+                    user.id,
+                    site,
+                    retry_results if retry_results is not None else results,
+                    self.output_dir,
+                )
             except Exception:
                 logger.exception(
                     "Không thể lưu manifest delivery cho Telegram ID %s", user.id
@@ -984,13 +996,18 @@ class AudioBot:
                 format_link_progress("downloading", discovered=len(urls)),
                 parse_mode="HTML",
             )
-            results = []
-            downloaded_files: list[Path] = []
+            results: list[Mapping[str, Any]] = []
             loop = asyncio.get_running_loop()
-            semaphore = asyncio.Semaphore(4)
+            download_semaphore = asyncio.Semaphore(4)
+            process_semaphore = asyncio.Semaphore(DEFAULT_WORKERS)
+            downloaded_total = 0
+            processed_total = 0
+            failures = 0
+            delivered_batches = 0
+            total_batches = (len(urls) + JOB_BATCH_FILES - 1) // JOB_BATCH_FILES
 
             async def download_one(audio_url: str) -> Path | None:
-                async with semaphore:
+                async with download_semaphore:
                     return await loop.run_in_executor(
                         None,
                         partial(
@@ -1001,33 +1018,138 @@ class AudioBot:
                         ),
                     )
 
-            tasks = [asyncio.create_task(download_one(audio_url)) for audio_url in urls]
-            failures = 0
-            for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
-                try:
-                    downloaded = await task
-                    if downloaded is not None:
-                        downloaded_files.append(downloaded)
-                    else:
-                        failures += 1
-                except CrawlerError as exc:
-                    failures += 1
-                    logger.warning("Không tải được một đường dẫn âm thanh: %s", exc)
-                if completed % 10 == 0 or completed == len(tasks):
-                    try:
-                        await status_message.edit_text(
-                            format_link_progress(
-                                "downloading",
-                                discovered=len(urls),
-                                downloaded=completed,
-                                failed_downloads=failures,
-                            ),
-                            parse_mode="HTML",
-                        )
-                    except TelegramError:
-                        pass
+            async def process_one(downloaded: Path) -> Mapping[str, Any]:
+                async with process_semaphore:
+                    result = await loop.run_in_executor(
+                        None,
+                        partial(
+                            process_file,
+                            downloaded,
+                            site,
+                            self.gate,
+                            self.processor,
+                            self.organizer,
+                            self.run_dir,
+                            delete_source=False,
+                            ephemeral=False,
+                        ),
+                    )
+                    source_hash = str(result.get("source_hash") or "")
+                    if downloaded.exists() and source_hash:
+                        try:
+                            archived = await loop.run_in_executor(
+                                None,
+                                partial(
+                                    self.organizer.archive_raw,
+                                    downloaded,
+                                    DOWNLOAD_DIR,
+                                    site,
+                                    result.get("analysis"),
+                                    source_hash,
+                                ),
+                            )
+                            result["raw"] = str(archived)
+                        except OSError:
+                            logger.exception("Không thể sắp xếp tệp raw %s", downloaded)
+                    return result
 
-            if not downloaded_files:
+            for batch_number, start in enumerate(
+                range(0, len(urls), JOB_BATCH_FILES), start=1
+            ):
+                batch_urls = urls[start : start + JOB_BATCH_FILES]
+                batch_downloaded: list[Path] = []
+                download_tasks = [
+                    asyncio.create_task(download_one(audio_url))
+                    for audio_url in batch_urls
+                ]
+                for completed, task in enumerate(
+                    asyncio.as_completed(download_tasks), start=1
+                ):
+                    try:
+                        downloaded = await task
+                        if downloaded is not None:
+                            batch_downloaded.append(downloaded)
+                            downloaded_total += 1
+                        else:
+                            failures += 1
+                    except Exception as exc:
+                        failures += 1
+                        logger.warning("Không tải được một đường dẫn âm thanh: %s", exc)
+                    if completed == 1 or completed % 10 == 0 or completed == len(batch_urls):
+                        try:
+                            await status_message.edit_text(
+                                format_link_progress(
+                                    "downloading",
+                                    discovered=len(urls),
+                                    downloaded=downloaded_total,
+                                    failed_downloads=failures,
+                                ),
+                                parse_mode="HTML",
+                            )
+                        except TelegramError:
+                            pass
+
+                if not batch_downloaded:
+                    continue
+
+                batch_results: list[Mapping[str, Any]] = []
+                process_tasks = [
+                    asyncio.create_task(process_one(downloaded))
+                    for downloaded in batch_downloaded
+                ]
+                for batch_processed, task in enumerate(
+                    asyncio.as_completed(process_tasks), start=1
+                ):
+                    try:
+                        batch_results.append(await task)
+                    except Exception as exc:
+                        logger.exception("Không thể xử lý một file trong hàng phân loại")
+                        batch_results.append({"status": "error", "error": str(exc)})
+                    processed_total += 1
+                    if (
+                        batch_processed == 1
+                        or batch_processed % 5 == 0
+                        or batch_processed == len(batch_downloaded)
+                    ):
+                        try:
+                            await status_message.edit_text(
+                                format_link_progress(
+                                    "analyzing",
+                                    discovered=len(urls),
+                                    downloaded=downloaded_total,
+                                    processed=processed_total,
+                                    failed_downloads=failures,
+                                ),
+                                parse_mode="HTML",
+                            )
+                        except TelegramError:
+                            pass
+
+                results.extend(batch_results)
+                if deliverable_paths(batch_results):
+                    await self._send_processed_files(
+                        update,
+                        batch_results,
+                        site,
+                        retry_results=results,
+                    )
+                    delivered_batches += 1
+                try:
+                    await status_message.edit_text(
+                        format_link_progress(
+                            "analyzing",
+                            discovered=len(urls),
+                            downloaded=downloaded_total,
+                            processed=processed_total,
+                            failed_downloads=failures,
+                        )
+                        + f"\n📦 Đã hoàn tất lô {batch_number}/{total_batches}.",
+                        parse_mode="HTML",
+                    )
+                except TelegramError:
+                    pass
+
+            if downloaded_total == 0:
                 await status_message.edit_text(
                     format_link_failure(
                         f"⚠️ Không tải được tệp âm thanh nào từ {len(urls)} đường dẫn đã tìm thấy. "
@@ -1039,71 +1161,16 @@ class AudioBot:
 
             await status_message.edit_text(
                 format_link_progress(
-                    "analyzing",
-                    discovered=len(urls),
-                    downloaded=len(downloaded_files),
-                    failed_downloads=failures,
-                ),
-                parse_mode="HTML",
-            )
-            for processed, downloaded in enumerate(downloaded_files, start=1):
-                result = await loop.run_in_executor(
-                    None,
-                    partial(
-                        process_file,
-                        downloaded,
-                        site,
-                        self.gate,
-                        self.processor,
-                        self.organizer,
-                        self.run_dir,
-                        delete_source=False,
-                        ephemeral=False,
-                    ),
-                )
-                source_hash = str(result.get("source_hash") or "")
-                if downloaded.exists() and source_hash:
-                    try:
-                        archived = await loop.run_in_executor(
-                            None,
-                            partial(
-                                self.organizer.archive_raw,
-                                downloaded,
-                                DOWNLOAD_DIR,
-                                site,
-                                result.get("analysis"),
-                                source_hash,
-                            ),
-                        )
-                        result["raw"] = str(archived)
-                    except OSError:
-                        logger.exception("Không thể sắp xếp tệp raw %s", downloaded)
-                results.append(result)
-                if processed % 10 == 0 or processed == len(downloaded_files):
-                    try:
-                        await status_message.edit_text(
-                            format_link_progress(
-                                "analyzing",
-                                discovered=len(urls),
-                                downloaded=len(downloaded_files),
-                                processed=processed,
-                                failed_downloads=failures,
-                            ),
-                            parse_mode="HTML",
-                        )
-                    except TelegramError:
-                        pass
-            await status_message.edit_text(
-                format_link_progress(
                     "complete",
                     discovered=len(urls),
-                    downloaded=len(downloaded_files),
-                    processed=len(results),
+                    downloaded=downloaded_total,
+                    processed=processed_total,
                     failed_downloads=failures,
                 ),
                 parse_mode="HTML",
             )
-            await self._send_processed_files(update, results, site)
+            if delivered_batches == 0:
+                await self._send_processed_files(update, results, site)
         except CrawlerError as exc:
             logger.warning("Không thể quét liên kết từ %s: %s", site, exc)
             error_text = format_crawler_error(exc)

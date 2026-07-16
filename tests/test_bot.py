@@ -281,6 +281,54 @@ async def test_empty_discovery_fallback_message_has_no_login_button() -> None:
 
 
 @pytest.mark.asyncio
+async def test_classification_updates_after_first_file_and_every_five(tmp_path) -> None:
+    status_message = SimpleNamespace(edit_text=AsyncMock())
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=77),
+        effective_message=SimpleNamespace(
+            text="https://sounds.example.com/pack",
+            reply_text=AsyncMock(return_value=status_message),
+        ),
+    )
+    urls = [f"https://cdn.example.com/{index}.mp3" for index in range(6)]
+
+    def download(url, raw_dir, _title):
+        path = tmp_path / Path(url).name
+        path.write_bytes(b"audio")
+        return path
+
+    bot = AudioBot.__new__(AudioBot)
+    bot.crawler = SimpleNamespace(
+        sniff_urls=AsyncMock(return_value=urls),
+        download=download,
+        discovered_titles={},
+    )
+    bot.gate = SimpleNamespace()
+    bot.processor = SimpleNamespace()
+    bot.organizer = SimpleNamespace()
+    bot.run_dir = tmp_path / "run"
+    bot._send_processed_files = AsyncMock()
+
+    def process(downloaded, *_args, **_kwargs):
+        return {"status": "passed", "output": str(downloaded)}
+
+    with patch("bot.process_file", side_effect=process), patch(
+        "bot.DEFAULT_WORKERS", 2
+    ), patch("bot.JOB_BATCH_FILES", 2):
+        await bot.handle_url(update, None)
+
+    progress_messages = [call.args[0] for call in status_message.edit_text.await_args_list]
+    assert any("1/6" in text for text in progress_messages)
+    assert any("5/6" in text for text in progress_messages)
+    assert bot._send_processed_files.await_count == 3
+    assert [len(call.args[1]) for call in bot._send_processed_files.await_args_list] == [2, 2, 2]
+    assert [
+        len(call.kwargs["retry_results"])
+        for call in bot._send_processed_files.await_args_list
+    ] == [2, 4, 6]
+
+
+@pytest.mark.asyncio
 async def test_processed_file_is_returned_through_telegram(tmp_path) -> None:
     output_root = tmp_path / "organized"
     output = output_root / "Loops" / "House" / "mau-da-xu-ly.wav"
