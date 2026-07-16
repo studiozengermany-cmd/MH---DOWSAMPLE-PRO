@@ -36,7 +36,6 @@ from telegram.ext import (
 from access_control import AccessControlStore, AccessStatus, RequestOutcome
 from config import (
     ADMIN_USER_ID,
-    AUDIO_EXTS,
     BASE_DIR,
     DATA_DIR,
     DB_PATH,
@@ -55,6 +54,7 @@ from crawler import AudioCrawler
 from delivery import DeliveryService, build_result_archives
 from delivery import build_result_archive as build_result_archive
 from delivery import deliverable_paths as deliverable_paths
+from delivery_retry import DeliveryRetryStore
 from exceptions import (
     BrowserUnavailableError,
     ConfigError,
@@ -380,6 +380,7 @@ class AudioBot:
         if ACCESS_DB_PATH.resolve() == DB_PATH.resolve():
             raise ConfigError("Access-control database must differ from audio-library database")
         self.access_control = AccessControlStore(ACCESS_DB_PATH)
+        self.delivery_retry_store = DeliveryRetryStore(DATA_DIR / "delivery-retries.db")
         self.run_dir = setup_cleanup(TEMP_ROOT)
         self.gate = QualityGate()
         self.processor = AudioProcessor()
@@ -811,46 +812,40 @@ class AudioBot:
     async def cmd_retry_delivery(
         self, update: Update, _context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Re-package the current organized library without crawling or processing again."""
+        """Re-send only the requesting user's latest job manifest."""
         if not self._has_access(update):
             await self._reply_access_gate(update)
             return
         message = update.effective_message
-        if not message:
+        user = update.effective_user
+        if not message or not user:
             return
         try:
-            paths = sorted(
-                (
-                    path
-                    for path in self.output_dir.rglob("*")
-                    if path.is_file() and path.suffix.lower() in AUDIO_EXTS
-                ),
-                key=lambda path: path.as_posix().lower(),
-            )
-        except OSError:
-            logger.exception("Không thể đọc thư viện hiện có để đóng gói lại")
+            record = self.delivery_retry_store.load(user.id, self.output_dir)
+        except Exception:
+            logger.exception("Không thể đọc manifest delivery của Telegram ID %s", user.id)
             await send_chunked(
                 update,
-                "❌ Không thể đọc thư viện hiện có. File gốc vẫn được giữ nguyên.",
+                "❌ Chưa thể đọc lịch sử giao file của anh/chị. Vui lòng thử lại sau.",
             )
             return
-        if not paths:
+        if record is None:
             await send_chunked(
                 update,
-                "⚠️ Không còn file audio nào trong thư viện để đóng gói lại.",
+                "⚠️ Chưa có job nào của tài khoản này để tải lại. "
+                "Bot không lấy file từ thư viện của người dùng khác.",
             )
             return
 
         await send_chunked(
             update,
-            f"⏳ Đang đóng gói lại <b>{len(paths)}</b> sample đã có. "
+            f"⏳ Đang đóng gói lại <b>{len(record.results)}</b> sample từ job gần nhất. "
             "Bot không tải hoặc xử lý lại từ đầu.",
         )
-        results = [{"status": "passed", "output": str(path)} for path in paths]
         await self._delivery_service(owner_mode="telegram").deliver(
             message,
-            results,
-            "library-retry",
+            record.results,
+            record.site,
             is_owner=False,
         )
 
@@ -885,6 +880,15 @@ class AudioBot:
         message = update.effective_message
         if not message:
             return
+        user = update.effective_user
+        retry_store = getattr(self, "delivery_retry_store", None)
+        if user and retry_store:
+            try:
+                retry_store.save(user.id, site, results, self.output_dir)
+            except Exception:
+                logger.exception(
+                    "Không thể lưu manifest delivery cho Telegram ID %s", user.id
+                )
         await self._delivery_service().deliver(
             message,
             results,

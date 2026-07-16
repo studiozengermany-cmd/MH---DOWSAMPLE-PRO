@@ -31,6 +31,7 @@ from exceptions import (
     NoAudioFoundError,
     PathTraversalError,
 )
+from delivery_retry import DeliveryRetryStore
 
 
 def test_empty_stats_are_presented_in_vietnamese() -> None:
@@ -296,6 +297,7 @@ async def test_processed_file_is_returned_through_telegram(tmp_path) -> None:
     bot = AudioBot.__new__(AudioBot)
     bot.run_dir = tmp_path / "run"
     bot.output_dir = output_root
+    bot.delivery_retry_store = DeliveryRetryStore(tmp_path / "delivery-retries.db")
 
     await bot._send_processed_files(
         update, [{"status": "passed", "output": str(output)}], "loopcloud.com"
@@ -308,6 +310,12 @@ async def test_processed_file_is_returned_through_telegram(tmp_path) -> None:
     assert reply_document.await_args.kwargs["write_timeout"] >= 30
     assert "gom gọn 1 sample" in reply_document.await_args.kwargs["caption"]
     assert not (bot.run_dir / "loopcloud.com-samples.zip").exists()
+    retry_record = bot.delivery_retry_store.load(-1, output_root)
+    assert retry_record is not None
+    assert retry_record.site == "loopcloud.com"
+    assert retry_record.results == (
+        {"status": "passed", "output": str(output.resolve())},
+    )
 
 
 @pytest.mark.asyncio
@@ -359,13 +367,23 @@ async def test_approved_user_can_retry_existing_library_without_reprocessing(tmp
     bot.output_dir = output_root
     bot.run_dir = tmp_path / "run"
     bot._has_access = lambda _update: True
+    bot.delivery_retry_store = DeliveryRetryStore(tmp_path / "delivery-retries.db")
+    bot.delivery_retry_store.save(
+        77,
+        "splice.com",
+        [
+            {"status": "passed", "output": str(first)},
+            {"status": "passed", "output": str(second)},
+        ],
+        output_root,
+    )
 
     await bot.cmd_retry_delivery(update, None)
 
     assert "<b>2</b> sample" in reply_text.await_args_list[0].args[0]
     assert "không tải hoặc xử lý lại" in reply_text.await_args_list[0].args[0]
     reply_document.assert_awaited_once()
-    assert reply_document.await_args.kwargs["filename"] == "library-retry-samples.zip"
+    assert reply_document.await_args.kwargs["filename"] == "splice.com-samples.zip"
     assert first.read_bytes() == b"RIFF-first"
     assert second.read_bytes() == b"RIFF-second"
     assert not list((tmp_path / "run").glob("*.zip"))
