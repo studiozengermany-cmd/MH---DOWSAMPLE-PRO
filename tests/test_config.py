@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ def test_float_setting_rejects_non_finite_values(
         config._env_float("TEST_FLOAT", 1.0)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only browser detection")
 def test_browser_detection_prefers_the_windows_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -45,6 +47,7 @@ def test_browser_detection_prefers_the_windows_default(
     assert config.find_browser_executable() == browser
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only browser detection")
 def test_browser_detection_supports_coc_coc_as_a_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
