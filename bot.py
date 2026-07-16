@@ -1015,6 +1015,42 @@ class AudioBot:
     ) -> None:
         """Check approval and serialize access to shared URL-pipeline state."""
         if not self._has_access(update):
+            message = update.effective_message
+            user = update.effective_user
+            if message and message.text and user:
+                text = message.text.strip()
+                # Tự động nhận diện nếu tin nhắn gửi lên là mã mời
+                try:
+                    outcome = self.access_control.submit_request(
+                        telegram_user_id=user.id,
+                        username=getattr(user, "username", None),
+                        full_name=getattr(user, "full_name", None),
+                        invite_code=text,
+                    )
+                    if outcome is RequestOutcome.CREATED:
+                        await message.reply_text(
+                            "✅ <b>ĐÃ GỬI YÊU CẦU THÀNH CÔNG</b>\n\n"
+                            "Quản trị viên sẽ xem xét. Anh/chị chỉ có thể sử dụng sau khi được duyệt.",
+                            parse_mode="HTML",
+                        )
+                        username = html.escape(f"@{user.username}" if getattr(user, "username", None) else "Không có")
+                        full_name = html.escape(str(getattr(user, "full_name", None) or "Không có"))
+                        await context.bot.send_message(
+                            chat_id=ADMIN_USER_ID,
+                            text=(
+                                "🔐 <b>YÊU CẦU QUYỀN MỚI</b>\n\n"
+                                f"• Telegram ID: <code>{user.id}</code>\n"
+                                f"• Tên: {full_name}\n"
+                                f"• Username: {username}"
+                            ),
+                            parse_mode="HTML",
+                            reply_markup=admin_access_keyboard(user.id, AccessStatus.PENDING),
+                        )
+                        await self.backup_database_to_telegram(context)
+                        return
+                except Exception:
+                    pass
+
             await self._reply_access_gate(update)
             return
         if not hasattr(self, "url_job_lock"):
