@@ -336,6 +336,42 @@ async def test_owner_uses_local_library_delivery_by_default(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_can_retry_existing_library_without_reprocessing(tmp_path) -> None:
+    output_root = tmp_path / "organized"
+    first = output_root / "Loops" / "first.wav"
+    second = output_root / "FX" / "second.wav"
+    ignored = output_root / "notes.txt"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_bytes(b"RIFF-first")
+    second.write_bytes(b"RIFF-second")
+    ignored.write_text("not audio", encoding="utf-8")
+    reply_text = AsyncMock()
+    reply_document = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=42),
+        effective_message=SimpleNamespace(
+            reply_text=reply_text,
+            reply_document=reply_document,
+        ),
+    )
+    bot = AudioBot.__new__(AudioBot)
+    bot.output_dir = output_root
+    bot.run_dir = tmp_path / "run"
+
+    with patch("bot.ADMIN_USER_ID", 42):
+        await bot.cmd_retry_delivery(update, None)
+
+    assert "<b>2</b> sample" in reply_text.await_args_list[0].args[0]
+    assert "không tải hoặc xử lý lại" in reply_text.await_args_list[0].args[0]
+    reply_document.assert_awaited_once()
+    assert reply_document.await_args.kwargs["filename"] == "library-retry-samples.zip"
+    assert first.read_bytes() == b"RIFF-first"
+    assert second.read_bytes() == b"RIFF-second"
+    assert not list((tmp_path / "run").glob("*.zip"))
+
+
+@pytest.mark.asyncio
 async def test_telegram_upload_timeout_is_retried(tmp_path) -> None:
     archive = tmp_path / "part.zip"
     archive.write_bytes(b"zip")

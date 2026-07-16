@@ -407,7 +407,11 @@ class DeliveryService:
             """Return false only for a fatal storage error that should stop this delivery."""
             nonlocal archive_count, build_attempt, fatal_build_error
             build_attempt += 1
-            batch_stem = f"{archive_stem}-batch-{build_attempt:03d}"
+            batch_stem = (
+                archive_stem
+                if len(batches) == 1 and build_attempt == 1
+                else f"{archive_stem}-batch-{build_attempt:03d}"
+            )
             archive_paths: list[Path] = []
             try:
                 archive_paths = await asyncio.get_running_loop().run_in_executor(
@@ -450,8 +454,15 @@ class DeliveryService:
                 for archive_path in archive_paths:
                     archive_count += 1
                     part_number = archive_count
+                    if len(batch) == manifest.ready_count and len(archive_paths) == 1:
+                        heading = f"✅ <b>Đã gom gọn {manifest.ready_count} sample</b>\n"
+                    else:
+                        heading = (
+                            "✅ <b>Gói sample đã sẵn sàng</b> — "
+                            f"gói <b>{part_number}</b>\n"
+                        )
                     caption = (
-                        f"✅ <b>Gói sample đã sẵn sàng</b> — gói <b>{part_number}</b>\n"
+                        heading
                         + "\n".join(_status_lines(manifest))
                         + "\nCác file trong gói giữ nguyên thư mục phân loại."
                     )

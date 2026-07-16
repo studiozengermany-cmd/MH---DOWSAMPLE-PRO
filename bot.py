@@ -36,6 +36,7 @@ from telegram.ext import (
 from access_control import AccessControlStore, AccessStatus, RequestOutcome
 from config import (
     ADMIN_USER_ID,
+    AUDIO_EXTS,
     BASE_DIR,
     DATA_DIR,
     DB_PATH,
@@ -807,11 +808,56 @@ class AudioBot:
                 update, "❌ Em chưa xử lý được thư mục này. Anh kiểm tra lại tệp và thử lại nhé."
             )
 
-    def _delivery_service(self) -> DeliveryService:
+    async def cmd_retry_delivery(
+        self, update: Update, _context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Re-package the current organized library without crawling or processing again."""
+        if not self._is_admin(update):
+            return
+        message = update.effective_message
+        if not message:
+            return
+        try:
+            paths = sorted(
+                (
+                    path
+                    for path in self.output_dir.rglob("*")
+                    if path.is_file() and path.suffix.lower() in AUDIO_EXTS
+                ),
+                key=lambda path: path.as_posix().lower(),
+            )
+        except OSError:
+            logger.exception("Không thể đọc thư viện hiện có để đóng gói lại")
+            await send_chunked(
+                update,
+                "❌ Không thể đọc thư viện hiện có. File gốc vẫn được giữ nguyên.",
+            )
+            return
+        if not paths:
+            await send_chunked(
+                update,
+                "⚠️ Không còn file audio nào trong thư viện để đóng gói lại.",
+            )
+            return
+
+        await send_chunked(
+            update,
+            f"⏳ Đang đóng gói lại <b>{len(paths)}</b> sample đã có. "
+            "Bot không tải hoặc xử lý lại từ đầu.",
+        )
+        results = [{"status": "passed", "output": str(path)} for path in paths]
+        await self._delivery_service(owner_mode="telegram").deliver(
+            message,
+            results,
+            "library-retry",
+            is_owner=False,
+        )
+
+    def _delivery_service(self, *, owner_mode: str | None = None) -> DeliveryService:
         return DeliveryService(
             output_root=self.output_dir,
             temp_root=self.run_dir,
-            owner_mode=OWNER_DELIVERY_MODE,
+            owner_mode=owner_mode or OWNER_DELIVERY_MODE,
             archive_part_bytes=TELEGRAM_ARCHIVE_PART_BYTES,
             upload_retries=TELEGRAM_UPLOAD_RETRIES,
             upload_timeout_sec=TELEGRAM_UPLOAD_TIMEOUT_SEC,
@@ -1122,6 +1168,7 @@ class AudioBot:
             BotCommand("thumuc", "Xem nơi lưu âm thanh trên máy chủ"),
             BotCommand("datthumuc", "Chọn nơi lưu sample trên máy chủ"),
             BotCommand("sapxep", "Xử lý một thư mục trên máy chủ"),
+            BotCommand("taigoi", "Đóng gói lại thư viện hiện có"),
         ]
         try:
             if (await application.bot.get_my_name()).name != name:
@@ -1211,6 +1258,7 @@ class AudioBot:
         application.add_handler(CommandHandler(["path", "thumuc"], self.cmd_path))
         application.add_handler(CommandHandler("datthumuc", self.cmd_set_output))
         application.add_handler(CommandHandler(["organize", "sapxep"], self.cmd_organize))
+        application.add_handler(CommandHandler("taigoi", self.cmd_retry_delivery))
         application.add_handler(
             CallbackQueryHandler(self.handle_access_callback, pattern=r"^access:")
         )
