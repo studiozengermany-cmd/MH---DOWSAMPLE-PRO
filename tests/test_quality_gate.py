@@ -31,7 +31,7 @@ def test_short_signal_is_one_shot() -> None:
 
 def test_analyze_returns_stable_contract(full_band_wav: Path, monkeypatch) -> None:
     gate = QualityGate()
-    monkeypatch.setattr(gate, "_get_bitrate", lambda _path: 320)
+    monkeypatch.setattr(gate, "_get_bitrate", lambda _path, *args, **kwargs: 320)
     result = gate.analyze(full_band_wav)
     expected = {
         "passed",

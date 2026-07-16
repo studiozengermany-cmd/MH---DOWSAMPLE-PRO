@@ -89,7 +89,7 @@ class QualityGate:
             if callable(close):
                 close()
 
-    def _get_bitrate(self, filepath: Path) -> int:
+    def _get_bitrate(self, filepath: Path, duration: float | None = None) -> int:
         try:
             command = [
                 "ffprobe",
@@ -118,9 +118,15 @@ class QualityGate:
                     return round(wav.getframerate() * wav.getsampwidth() * 8 * wav.getnchannels() / 1000)
             except (OSError, wave.Error):
                 pass
+        if duration is None:
+            try:
+                y, sr = self._load_audio(filepath)
+                mono = librosa.to_mono(y) if y.ndim > 1 else y
+                duration = len(mono) / sr
+            except Exception:
+                duration = 0.0
         size_bits = filepath.stat().st_size * 8
-        duration = librosa.get_duration(path=filepath)
-        return round(size_bits / duration / 1000) if duration > 0 else 0
+        return round(size_bits / duration / 1000) if duration and duration > 0 else 0
 
     def _classify_content(self, y: np.ndarray, sr: int) -> dict[str, Any]:
         duration = len(y) / sr
@@ -287,12 +293,12 @@ class QualityGate:
             "issues": [],
         }
         try:
-            bitrate = self._get_bitrate(path)
             y, sr = self._load_audio(path)
             sr = int(sr)
             channels = 1 if y.ndim == 1 else y.shape[0]
             mono = librosa.to_mono(y) if y.ndim > 1 else y
             duration = len(mono) / sr
+            bitrate = self._get_bitrate(path, duration=duration)
             result.update(
                 bitrate_kbps=bitrate, duration_sec=round(duration, 3), sample_rate=sr, channels=channels
             )
