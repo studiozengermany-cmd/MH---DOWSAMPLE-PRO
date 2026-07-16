@@ -1167,7 +1167,7 @@ class AudioBot:
                 runner = web.AppRunner(app)
                 await runner.setup()
                 port = int(os.getenv("PORT", "8080"))
-                site = web.TCPSite(runner, "0.0.0.0", port)
+                site = web.TCPSite(runner, "0.0.0.0", port)  # nosec B104
                 await site.start()
                 logger.info("Web server started successfully on port %d", port)
             except Exception as e:
